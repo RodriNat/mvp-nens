@@ -64,7 +64,19 @@
 
 .internal-approved-activity-page__layout {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-4);
+}
+
+.internal-approved-activity-page__column,
+.internal-approved-activity-page .scout-draft-review-form,
+.internal-approved-activity-page .scout-draft-review-form__grid,
+.internal-approved-activity-page .scout-draft-review-form__field {
+  min-width: 0;
+}
+
+.internal-approved-activity-page .rich-markdown-editor__surface .mdxeditor-toolbar {
+  overflow-x: auto;
 }
 
 .internal-approved-activity-page__panel {

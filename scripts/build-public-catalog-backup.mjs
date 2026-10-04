@@ -50,7 +50,8 @@ export function isPublicIp(address) {
 
 export function imageExtension(bytes, contentType) {
   const mime = contentType.split(";")[0].trim().toLowerCase();
-  if (mime === "image/png" && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png";
+  // Some existing PNG objects carry JPEG metadata. Copy verified PNG bytes as PNG.
+  if (["image/png", "image/jpeg"].includes(mime) && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png";
   if (mime === "image/jpeg" && bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) return "jpg";
   if (mime === "image/webp" && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") return "webp";
   if (mime === "image/gif" && ["GIF87a", "GIF89a"].includes(bytes.toString("ascii", 0, 6))) return "gif";

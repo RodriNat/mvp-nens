@@ -89,6 +89,12 @@ for (const ip of ["127.0.0.1", "10.0.0.1", "172.16.1.1", "192.168.1.1", "169.254
 assert.equal(isPublicIp("93.184.216.34"), true);
 assert.equal(isPublicIp("2606:4700:4700::1111"), true);
 assert.equal(imageExtension(image, "image/png"), "png");
+assert.equal(imageExtension(image, "image/jpeg"), "png");
+assert.equal(imageExtension(image, "Image/JPEG; charset=binary"), "png");
+assert.throws(() => imageExtension(image, "application/octet-stream"));
+assert.throws(() => imageExtension(image, "image/svg+xml"));
+assert.throws(() => imageExtension(Buffer.from("<svg><script>bad()</script></svg>"), "image/jpeg"));
+assert.throws(() => imageExtension(Buffer.from("<script>bad</script>"), "image/jpeg"));
 assert.throws(() => imageExtension(Buffer.from("<script>bad</script>"), "image/png"));
 await assert.rejects(() => downloadPublicImage("https://image.invalid/cover.png", {
   lookupImpl: async () => [{ address: "127.0.0.1", family: 4 }],

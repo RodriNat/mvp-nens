@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, LoaderCircle, SearchX } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Footer } from "@/components/Footer";
 import { CatalogState } from "@/components/states/CatalogState";
@@ -21,7 +21,11 @@ import {
   listDraftCenters,
   listDraftTypes,
 } from "@/services/internalDraftsService";
-import { resolveActivityImagePreviewUrl } from "@/services/internalDraftCoverImageService";
+import {
+  resolveActivityImagePreviewUrl,
+  uploadDraftCoverImage,
+  validateDraftCoverImageFile,
+} from "@/services/internalDraftCoverImageService";
 import "./InternalApprovedActivityPage.css";
 
 function formatDateLabel(value) {
@@ -112,9 +116,18 @@ export function InternalApprovedActivityPage() {
   const [feedbackTone, setFeedbackTone] = useState("success");
   const [isSaving, setIsSaving] = useState(false);
   const [isTogglingPublication, setIsTogglingPublication] = useState(false);
+  const [coverFile, setCoverFile] = useState(null);
+  const [coverPreviewUrl, setCoverPreviewUrl] = useState("");
+  const routeVersion = useRef(0);
+  const writeInFlight = useRef(null);
 
   useEffect(() => {
     let isMounted = true;
+    routeVersion.current += 1;
+    writeInFlight.current = null;
+    setCoverFile(null);
+    setIsSaving(false);
+    setIsTogglingPublication(false);
 
     const numericActivityId = Number(activityId);
 
@@ -167,11 +180,35 @@ export function InternalApprovedActivityPage() {
 
     return () => {
       isMounted = false;
+      routeVersion.current += 1;
+      writeInFlight.current = null;
     };
   }, [activityId]);
 
-  const refreshActivity = async (nextFeedbackMessage = "", nextFeedbackTone = "success") => {
+  useEffect(() => {
+    if (!coverFile) {
+      setCoverPreviewUrl("");
+      return undefined;
+    }
+
+    const objectUrl = URL.createObjectURL(coverFile);
+    setCoverPreviewUrl(objectUrl);
+
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [coverFile]);
+
+  const isCurrentWrite = (operation) =>
+    writeInFlight.current === operation &&
+    routeVersion.current === operation.routeVersion;
+  const isWriteBusy = isSaving || isTogglingPublication;
+  const hasPendingImageChange = Boolean(coverFile) ||
+    getTrimmedText(formState.imageUrl) !==
+      getTrimmedText(activity?.activityPayload?.activity?.image_url);
+
+  const refreshActivity = async (nextFeedbackMessage, nextFeedbackTone, operation) => {
     const nextActivity = await getInternalApprovedActivity(Number(activityId));
+
+    if (!isCurrentWrite(operation)) return;
 
     if (!nextActivity) {
       throw new Error("No pudimos refrescar la actividad aprobada.");
@@ -179,20 +216,32 @@ export function InternalApprovedActivityPage() {
 
     setActivity(nextActivity);
     setFormState(mapDraftPayloadToFormState(nextActivity.activityPayload));
+    setCoverFile(null);
     setReviewNotes(nextActivity.reviewNotes || "");
     setFeedbackMessage(nextFeedbackMessage);
     setFeedbackTone(nextFeedbackTone);
   };
 
   const handleFieldChange = (fieldName, nextValue) => {
+    if (writeInFlight.current) return;
     setFormState((currentFormState) => ({
       ...currentFormState,
       [fieldName]: nextValue,
     }));
   };
 
+  const handleImageFileChange = (file) => {
+    if (!activity || isLoading || writeInFlight.current) return;
+    const validationError = file ? validateDraftCoverImageFile(file) : "";
+    setCoverFile(validationError ? null : file);
+    setFeedbackTone(validationError ? "error" : "success");
+    setFeedbackMessage(validationError || (file
+      ? "Imagen preparada. Guarda los cambios para conservarla."
+      : ""));
+  };
+
   const handleSaveChanges = async () => {
-    if (!activity) {
+    if (!activity || isLoading || writeInFlight.current) {
       return;
     }
 
@@ -204,18 +253,43 @@ export function InternalApprovedActivityPage() {
       return;
     }
 
+    const operation = { routeVersion: routeVersion.current };
+    writeInFlight.current = operation;
     setIsSaving(true);
     setFeedbackMessage("");
     setError("");
 
     try {
+      let nextFormState = formState;
+
+      if (coverFile) {
+        setFeedbackMessage("Subiendo imagen y guardando cambios...");
+        let imagePath;
+        try {
+          imagePath = await uploadDraftCoverImage({
+            draftId: activity.draftId,
+            file: coverFile,
+          });
+        } catch {
+          throw new Error("No pudimos subir la imagen. Usa JPG, PNG o WebP de hasta 5 MB y reintenta.");
+        }
+        if (!isCurrentWrite(operation)) return;
+
+        // Retain a completed upload if saving fails; retry must not upload again.
+        nextFormState = { ...formState, imageUrl: imagePath };
+        setFormState(nextFormState);
+        setCoverFile(null);
+      }
+
       await saveInternalApprovedActivityReview({
         draftId: activity.draftId,
-        reviewedPayload: mapFormStateToDraftPayload(formState),
+        reviewedPayload: mapFormStateToDraftPayload(nextFormState),
         reviewNotes,
       });
-      await refreshActivity("Actividad aprobada actualizada.", "success");
+      if (!isCurrentWrite(operation)) return;
+      await refreshActivity("Actividad aprobada actualizada.", "success", operation);
     } catch (saveError) {
+      if (!isCurrentWrite(operation)) return;
       setFeedbackTone("error");
       setFeedbackMessage(
         saveError instanceof Error
@@ -223,15 +297,20 @@ export function InternalApprovedActivityPage() {
           : "No pudimos guardar la actividad aprobada.",
       );
     } finally {
-      setIsSaving(false);
+      if (isCurrentWrite(operation)) {
+        writeInFlight.current = null;
+        setIsSaving(false);
+      }
     }
   };
 
   const handleTogglePublication = async () => {
-    if (!activity) {
+    if (!activity || isLoading || writeInFlight.current || hasPendingImageChange) {
       return;
     }
 
+    const operation = { routeVersion: routeVersion.current };
+    writeInFlight.current = operation;
     setIsTogglingPublication(true);
     setFeedbackMessage("");
     setError("");
@@ -242,15 +321,18 @@ export function InternalApprovedActivityPage() {
           draftId: activity.draftId,
           reviewNotes,
         });
-        await refreshActivity("Actividad retirada del catálogo público.", "success");
+        if (!isCurrentWrite(operation)) return;
+        await refreshActivity("Actividad retirada del catálogo público.", "success", operation);
       } else {
         await republishInternalApprovedActivity({
           draftId: activity.draftId,
           reviewNotes,
         });
-        await refreshActivity("Actividad devuelta al catálogo público.", "success");
+        if (!isCurrentWrite(operation)) return;
+        await refreshActivity("Actividad devuelta al catálogo público.", "success", operation);
       }
     } catch (toggleError) {
+      if (!isCurrentWrite(operation)) return;
       setFeedbackTone("error");
       setFeedbackMessage(
         toggleError instanceof Error
@@ -258,7 +340,10 @@ export function InternalApprovedActivityPage() {
           : "No pudimos cambiar el estado público de la actividad.",
       );
     } finally {
-      setIsTogglingPublication(false);
+      if (isCurrentWrite(operation)) {
+        writeInFlight.current = null;
+        setIsTogglingPublication(false);
+      }
     }
   };
 
@@ -270,6 +355,7 @@ export function InternalApprovedActivityPage() {
               <Button
                 variant="ghost"
                 className="internal-approved-activity-page__back-button"
+                disabled={isWriteBusy}
                 onClick={() =>
                   navigate(
                     activity?.draftId
@@ -342,10 +428,14 @@ export function InternalApprovedActivityPage() {
                         categoryChoices={categoryChoices}
                         typeChoices={typeChoices}
                         formState={formState}
-                        imagePreviewSrc={resolveActivityImagePreviewUrl(
+                        imagePreviewSrc={coverPreviewUrl || resolveActivityImagePreviewUrl(
                           formState.imageUrl,
                         )}
                         onFieldChange={handleFieldChange}
+                        isImageUploadEnabled
+                        onImageFileChange={handleImageFileChange}
+                        showImageUrlField={false}
+                        isReadOnly={isWriteBusy}
                       />
 
                       <div className="internal-approved-activity-page__notes-field">
@@ -356,6 +446,7 @@ export function InternalApprovedActivityPage() {
                           id="approved-activity-review-notes"
                           className="internal-approved-activity-page__notes-input"
                           value={reviewNotes}
+                          disabled={isWriteBusy}
                           onChange={(event) => setReviewNotes(event.target.value)}
                         />
                       </div>
@@ -373,13 +464,13 @@ export function InternalApprovedActivityPage() {
                         <Button
                           variant="outline"
                           onClick={handleSaveChanges}
-                          disabled={isSaving || isTogglingPublication}
+                          disabled={isWriteBusy}
                         >
                           {isSaving ? "Guardando..." : "Guardar cambios"}
                         </Button>
                         <Button
                           onClick={handleTogglePublication}
-                          disabled={isSaving || isTogglingPublication}
+                          disabled={isWriteBusy || hasPendingImageChange}
                         >
                           {isTogglingPublication
                             ? activity.isPublished
